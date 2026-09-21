@@ -24,7 +24,7 @@ with sync_playwright() as p:
   page.route('**/deployment.json',lambda r:r.fulfill(json={'address':ADDRESS}))
   page.route('**/studio.genlayer.com/api',lambda r:r.fulfill(json={'jsonrpc':'2.0','id':1,'result':{'status':'FINALIZED','result_name':'MAJORITY_AGREE','tx_execution_result_name':'FINISHED_WITH_RETURN'}}))
   page.add_init_script('window.fixture='+json.dumps(fixture))
-  page.goto('http://127.0.0.1:8767/')
+  page.goto('http://127.0.0.1:8766/')
   page.wait_for_function("document.querySelector('#deployment').textContent.includes('0x')")
   page.click('#connect');page.wait_for_function("document.querySelector('#notice').textContent.includes('ready')",timeout=60000)
   page.click('.audit-item');page.wait_for_selector('#ledger .source')

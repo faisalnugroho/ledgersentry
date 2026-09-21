@@ -20,3 +20,16 @@ jobs:
           curl -fLsS --retry 3 https://github.com/genlayerlabs/genvm/releases/download/v0.3.0-rc7/genvm-runners-all.tar.xz -o ~/.cache/gltest-direct/genvm-universal-v0.3.0-rc7.tar.xz
       - run: python -m pytest tests/ -v --tb=short
       - run: node --check frontend/app.js
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install playwright==1.58.0
+      - run: python -m playwright install --with-deps chromium
+      - name: Run mocked browser integration
+        run: |
+          python -m http.server 8766 --bind 127.0.0.1 --directory frontend > /tmp/server.log 2>&1 &
+          python scripts/browser_test.py
