@@ -17,19 +17,20 @@ ROOT = Path(__file__).resolve().parents[1]
 LOG = ROOT / "evidence/live.json"
 KEY = Path.home() / ".genlayer-keys/ledgersentry-key.json"
 RPC = "https://studio.genlayer.com/api"
-REV = ""  # filled after push: the deployed commit pinning every example source
+REV = "5c541acdf2d4f6542bdafbb6cea34cdfd096827d"  # deployed commit pinning every example source (full 40-hex: contract regex requires it)
 BASE = "https://raw.githubusercontent.com/faisalnugroho/ledgersentry"
 
 REQS = [
     "The artifact states the total supply of the token and its decimals.",
     "The artifact names the deployer account and the deployment date.",
-    "The artifact lists every token lock with its exact release date.",
+    "The artifact states its token-lock list is complete (no other token locks exist) and lists each lock with its release date.",
 ]
-SUBJECT_OK = 'Token LAUNCH total supply is 1,000,000 with 18 decimals. Deployer is 0xabc deployed on 2026-01-05. Locks: team 40% released 2027-01-05, community 10% released 2026-07-05.\n'
+SUBJECT_OK = 'Token LAUNCH total supply is 1,000,000 with 18 decimals. Deployer is 0xabc deployed on 2026-01-05. Locks: team 40% released 2027-01-05, community 10% released 2026-07-05. This lock list is complete; no other token locks exist for LAUNCH.\n'
 SUBJECT_BAD = 'Token LAUNCH total supply is 1,000,000 with 18 decimals. Deployer is 0xabc deployed on 2026-01-05. The team lock of 40% was quietly removed from this statement; no locks are disclosed at all in this version.\n'
 SUBJECT_THIN = 'Tiny stub page.\n'
 EV_DASH = 'Independent dashboard mirrors the supply of 1,000,000 and 18 decimals and lists the team lock releasing 2027-01-05.\n'
 EV_ARCHIVE = 'Archive snapshot shows the deployer address 0xabc registered on 2026-01-05.\n'
+EV_REBUTTAL = 'Dispute rebuttal: the audit subject remains accurate. The independent dashboard mirrors the supply of 1,000,000 and 18 decimals and lists the team lock releasing 2027-01-05.\n'
 
 
 def rpc(method, params):
@@ -68,7 +69,7 @@ def pinned(name):
 
 
 def sha(body):
-    return hashlib.sha256(body).hexdigest()
+    return hashlib.sha256(body.encode() if isinstance(body, str) else body).hexdigest()
 
 
 def fetch_bytes(url):
@@ -122,7 +123,16 @@ def run():
     def write(label, method, values, expected_success=True):
         step = log["steps"].get(label)
         if not step:
-            tx = client.write_contract(address=address, function_name=method, args=values, account=client.local_account, leader_only=False)
+            tx = None
+            for attempt in range(4):
+                try:
+                    tx = client.write_contract(address=address, function_name=method, args=values, account=client.local_account, leader_only=False)
+                    break
+                except Exception as err:
+                    if attempt == 3:
+                        raise
+                    print("rpc error, retrying:", str(err)[:120], flush=True)
+                    time.sleep(20 * (attempt + 1))
             step = {"tx": tx, "method": method, "args": values}
             log["steps"][label] = step
             save(log)
@@ -143,12 +153,12 @@ def run():
         for i, (name, body) in enumerate(evidence):
             write(f"{label}-ev{i}", "add_evidence", [aid, pinned(name), sha(body)])
 
-    # 1-2: compliant audit with mirrored evidence -> COMPLIANT
-    audit("compliant", "ls-compliant", "subject-ok.md", SUBJECT_OK,
+    # 1-2: compliance-positive audit with mirrored evidence -> COMPLIANT
+    audit("clean", "ls-clean", "subject-ok.md", SUBJECT_OK,
           evidence=[("evidence-dashboard.md", EV_DASH), ("evidence-archive.md", EV_ARCHIVE)])
-    write("compliant-resolve", "resolve", ["ls-compliant"])
-    record = read("ls-compliant")
-    log.setdefault("audits", {})["ls-compliant"] = record
+    write("clean-resolve", "resolve", ["ls-clean"])
+    record = read("ls-clean")
+    log.setdefault("audits", {})["ls-clean"] = record
     save(log)
     assert record["status"] == "RESOLVED" and record["result"]["verdict"] == "COMPLIANT", record
 
@@ -173,7 +183,7 @@ def run():
     write("dispute-open", "open_dispute", ["ls-dispute"])
     record = read("ls-dispute")
     assert record["status"] == "DISPUTED" and record["dispute_deadline"] > 0, record
-    write("dispute-ev", "add_dispute_evidence", ["ls-dispute", pinned("dispute-rebuttal.md"), sha(EV_DASH)])
+    write("dispute-ev", "add_dispute_evidence", ["ls-dispute", pinned("dispute-rebuttal.md"), sha(EV_REBUTTAL)])
     write("dispute-early", "resolve", ["ls-dispute"], expected_success=False)
     record = read("ls-dispute")
     assert record["status"] == "DISPUTED", record
