@@ -1,0 +1,195 @@
+"""Real Studionet deployment and live smoke for LedgerSentry. Never submits Portal.
+Usage: python scripts/live_smoke.py --deploy; python scripts/live_smoke.py --smoke
+Resumes logged transaction hashes, never silently re-sends an uncertain write.
+"""
+import argparse
+import base64
+import hashlib
+import json
+import time
+from pathlib import Path
+from urllib.request import urlopen
+import requests
+from genlayer_py import create_client, create_account
+from genlayer_py.chains import studionet
+
+ROOT = Path(__file__).resolve().parents[1]
+LOG = ROOT / "evidence/live.json"
+KEY = Path.home() / ".genlayer-keys/ledgersentry-key.json"
+RPC = "https://studio.genlayer.com/api"
+REV = ""  # filled after push: the deployed commit pinning every example source
+BASE = "https://raw.githubusercontent.com/faisalnugroho/ledgersentry"
+
+REQS = [
+    "The artifact states the total supply of the token and its decimals.",
+    "The artifact names the deployer account and the deployment date.",
+    "The artifact lists every token lock with its exact release date.",
+]
+SUBJECT_OK = 'Token LAUNCH total supply is 1,000,000 with 18 decimals. Deployer is 0xabc deployed on 2026-01-05. Locks: team 40% released 2027-01-05, community 10% released 2026-07-05.\n'
+SUBJECT_BAD = 'Token LAUNCH total supply is 1,000,000 with 18 decimals. Deployer is 0xabc deployed on 2026-01-05. The team lock of 40% was quietly removed from this statement; no locks are disclosed at all in this version.\n'
+SUBJECT_THIN = 'Tiny stub page.\n'
+EV_DASH = 'Independent dashboard mirrors the supply of 1,000,000 and 18 decimals and lists the team lock releasing 2027-01-05.\n'
+EV_ARCHIVE = 'Archive snapshot shows the deployer address 0xabc registered on 2026-01-05.\n'
+
+
+def rpc(method, params):
+    response = requests.post(RPC, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, timeout=45)
+    response.raise_for_status()
+    data = response.json()
+    if "error" in data:
+        raise RuntimeError(data["error"])
+    return data["result"]
+
+
+def save(data):
+    LOG.parent.mkdir(exist_ok=True)
+    LOG.write_text(json.dumps(data, indent=2))
+
+
+def wait(tx):
+    deadline = time.monotonic() + 900
+    while time.monotonic() < deadline:
+        record = rpc("eth_getTransactionByHash", [tx])
+        if record and record.get("status") in ("FINALIZED", "UNDETERMINED", "CANCELED"):
+            return record
+        time.sleep(10)
+    raise TimeoutError("Transaction pending; resume by hash, do not resubmit: " + tx)
+
+
+def succeeded(record):
+    leaders = (record.get("consensus_data") or {}).get("leader_receipt") or []
+    execution = record.get("tx_execution_result_name") or (leaders[0].get("execution_result") if leaders else None)
+    return record.get("status") == "FINALIZED" and record.get("result_name") == "MAJORITY_AGREE" and execution in ("FINISHED_WITH_RETURN", "SUCCESS")
+
+
+def pinned(name):
+    assert REV, "set REV to the deployed commit hash before smoking"
+    return f"{BASE}/{REV}/examples/{name}"
+
+
+def sha(body):
+    return hashlib.sha256(body).hexdigest()
+
+
+def fetch_bytes(url):
+    with urlopen(url, timeout=30) as res:
+        return res.read()
+
+
+def run():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--deploy", action="store_true")
+    parser.add_argument("--smoke", action="store_true")
+    args = parser.parse_args()
+    if not args.deploy and not args.smoke:
+        parser.error("choose --deploy or --smoke")
+    KEY.parent.mkdir(exist_ok=True)
+    if KEY.exists():
+        account = create_account(account_private_key=json.loads(KEY.read_text())["private_key"])
+    else:
+        account = create_account()
+        KEY.touch(mode=0o600)
+        KEY.write_text(json.dumps({"address": account.address, "private_key": account.key.hex()}))
+    client = create_client(chain=studionet, account=account)
+    log = json.loads(LOG.read_text()) if LOG.exists() else {"network": "studionet", "rpc": RPC, "owner": account.address, "steps": {}}
+    if args.deploy:
+        source = (ROOT / "contracts/ledgersentry.py").read_text()
+        if "deploy_tx" not in log:
+            client.fund_account(account.address, 10**18)
+            log["source_sha256"] = hashlib.sha256(source.encode()).hexdigest()
+            log["deploy_tx"] = client.deploy_contract(code=source, account=client.local_account, args=[], leader_only=False)
+            save(log)
+            print("deploy", log["deploy_tx"], flush=True)
+        receipt = wait(log["deploy_tx"])
+        log["deploy_receipt"] = receipt
+        save(log)
+        if not succeeded(receipt):
+            raise RuntimeError("Deployment execution/consensus not successful: " + json.dumps(receipt))
+        address = (receipt.get("data") or {}).get("contract_address") or receipt.get("to_address")
+        assert address, "no deployment address"
+        log["address"] = address
+        actual_code = base64.b64decode(receipt["data"]["contract_code"])
+        assert hashlib.sha256(actual_code).hexdigest() == log["source_sha256"]
+        assert json.loads(client.read_contract(address=address, function_name="list_audits", args=[])) == [] or log["steps"]
+        save(log)
+        (ROOT / "frontend").mkdir(exist_ok=True)
+        (ROOT / "frontend/deployment.json").write_text(json.dumps({"address": address, "network": "studionet", "chainId": 61999, "deployTx": log["deploy_tx"]}, indent=2))
+        print("DEPLOY_VERIFIED", address, flush=True)
+    if not args.smoke:
+        return
+    address = log["address"]
+
+    def write(label, method, values, expected_success=True):
+        step = log["steps"].get(label)
+        if not step:
+            tx = client.write_contract(address=address, function_name=method, args=values, account=client.local_account, leader_only=False)
+            step = {"tx": tx, "method": method, "args": values}
+            log["steps"][label] = step
+            save(log)
+            print(label, tx, flush=True)
+        receipt = wait(step["tx"])
+        step["receipt"] = receipt
+        step["success"] = succeeded(receipt)
+        save(log)
+        if step["success"] != expected_success:
+            raise RuntimeError("Unexpected transaction outcome at " + label + ": " + json.dumps(receipt))
+        print(label, "verified", receipt.get("result_name"), receipt.get("tx_execution_result_name"), flush=True)
+
+    def read(aid):
+        return json.loads(client.read_contract(address=address, function_name="get_audit", args=[aid]))
+
+    def audit(label, aid, subject_file, subject_body, evidence=(), window=3600):
+        write(label + "-open", "open_audit", [aid, "Live smoke: " + aid, pinned(subject_file), sha(subject_body), json.dumps(REQS), window])
+        for i, (name, body) in enumerate(evidence):
+            write(f"{label}-ev{i}", "add_evidence", [aid, pinned(name), sha(body)])
+
+    # 1-2: compliant audit with mirrored evidence -> COMPLIANT
+    audit("compliant", "ls-compliant", "subject-ok.md", SUBJECT_OK,
+          evidence=[("evidence-dashboard.md", EV_DASH), ("evidence-archive.md", EV_ARCHIVE)])
+    write("compliant-resolve", "resolve", ["ls-compliant"])
+    record = read("ls-compliant")
+    log.setdefault("audits", {})["ls-compliant"] = record
+    save(log)
+    assert record["status"] == "RESOLVED" and record["result"]["verdict"] == "COMPLIANT", record
+
+    # 3: violating subject (locks removed) -> VIOLATION
+    audit("violation", "ls-violation", "subject-bad.md", SUBJECT_BAD)
+    write("violation-resolve", "resolve", ["ls-violation"])
+    record = read("ls-violation")
+    log.setdefault("audits", {})["ls-violation"] = record
+    save(log)
+    assert record["status"] == "RESOLVED" and record["result"]["verdict"] == "VIOLATION", record
+
+    # 4: thin (49-char) subject -> deterministic fail-closed INCONCLUSIVE
+    audit("inconclusive", "ls-thin", "subject-thin.md", SUBJECT_THIN)
+    write("inconclusive-resolve", "resolve", ["ls-thin"])
+    record = read("ls-thin")
+    log.setdefault("audits", {})["ls-thin"] = record
+    save(log)
+    assert record["status"] == "RESOLVED" and record["result"]["verdict"] == "INCONCLUSIVE", record
+
+    # 5: dispute path with a short window (minimum 60s on-chain)
+    audit("dispute", "ls-dispute", "subject-ok.md", SUBJECT_OK, window=60)
+    write("dispute-open", "open_dispute", ["ls-dispute"])
+    record = read("ls-dispute")
+    assert record["status"] == "DISPUTED" and record["dispute_deadline"] > 0, record
+    write("dispute-ev", "add_dispute_evidence", ["ls-dispute", pinned("dispute-rebuttal.md"), sha(EV_DASH)])
+    write("dispute-early", "resolve", ["ls-dispute"], expected_success=False)
+    record = read("ls-dispute")
+    assert record["status"] == "DISPUTED", record
+    print("waiting out the 60s dispute window...", flush=True)
+    while time.time() < record["dispute_deadline"] + 5:
+        time.sleep(5)
+    write("dispute-resolve", "resolve", ["ls-dispute"])
+    record = read("ls-dispute")
+    log.setdefault("audits", {})["ls-dispute"] = record
+    save(log)
+    assert record["status"] == "RESOLVED", record
+
+    log["smoke_complete"] = True
+    save(log)
+    print("LIVE_SMOKE_PASS", flush=True)
+
+
+if __name__ == "__main__":
+    run()

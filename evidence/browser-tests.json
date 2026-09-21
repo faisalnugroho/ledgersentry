@@ -1,0 +1,36 @@
+[
+  {
+    "width": 1440,
+    "checks": [
+      "audit_read",
+      "ledger",
+      "terminal_guards",
+      "escaped_content",
+      "no_overflow",
+      "receipt_fail_closed",
+      "write_args",
+      "write_readback",
+      "network_failure",
+      "no_js_errors"
+    ],
+    "passed": true,
+    "mode": "MOCKED SDK/RPC"
+  },
+  {
+    "width": 390,
+    "checks": [
+      "audit_read",
+      "ledger",
+      "terminal_guards",
+      "escaped_content",
+      "no_overflow",
+      "receipt_fail_closed",
+      "write_args",
+      "write_readback",
+      "network_failure",
+      "no_js_errors"
+    ],
+    "passed": true,
+    "mode": "MOCKED SDK/RPC"
+  }
+]

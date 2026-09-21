@@ -1,0 +1,1 @@
+Token LAUNCH total supply is 1,000,000 with 18 decimals. Deployer is 0xabc deployed on 2026-01-05. The team lock of 40% was quietly removed from this statement; no locks are disclosed at all in this version.

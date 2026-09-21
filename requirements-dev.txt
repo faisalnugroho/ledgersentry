@@ -1,0 +1,4 @@
+gltest==0.29.2
+genlayer-py
+pytest
+eth-utils
