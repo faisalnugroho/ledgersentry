@@ -39,6 +39,7 @@ KEY = Path.home() / ".genlayer-keys/ledgersentry-key.json"
 RPC = "https://studio.genlayer.com/api"
 REV = "2ecf05c13e6cfe6318ba61a91ef033927c24dc09"  # deployed commit pinning every example source (full 40-hex: contract regex requires it)
 BASE = "https://raw.githubusercontent.com/faisalnugroho/ledgersentry"
+CHALLENGE = 86400  # universal challenge period written at open_audit
 
 REQS = [
     "The artifact states the total supply of the token and its decimals.",
@@ -188,14 +189,28 @@ def run():
                 time.sleep(10 * (attempt + 1))
         raise last
 
-    def audit(label, aid, subject_file, subject_body, evidence=(), window=3600):
-        write(label + "-open", "open_audit", [aid, "Live smoke: " + aid, pinned(subject_file), sha(subject_body), json.dumps(REQS), window])
+    def audit(label, aid, subject_file, subject_body, evidence=(), window=3600,
+              challenge=CHALLENGE):
+        write(label + "-open", "open_audit", [aid, "Live smoke: " + aid, pinned(subject_file), sha(subject_body), json.dumps(REQS), window, challenge])
         for i, (name, body) in enumerate(evidence):
             write(f"{label}-ev{i}", "add_evidence", [aid, pinned(name), sha(body)])
 
+    def wait_until(ts, why):
+        pause = ts - time.time() + 10
+        if pause > 0:
+            print("waiting %ds until %s..." % (int(pause), why), flush=True)
+            time.sleep(pause)
+
+    def deadline_of(aid, key):
+        return read(aid).get(key) or 0
+
     # 1-2: compliance-positive audit with mirrored evidence -> COMPLIANT
+    # (challenge=300: the smoke waits out the challenge period, then resolves
+    # — universal pre-deadline revert is exercised by the direct tests.)
     audit("clean", "ls-clean", "subject-ok.md", SUBJECT_OK,
-          evidence=[("evidence-dashboard.md", EV_DASH), ("evidence-archive.md", EV_ARCHIVE)])
+          evidence=[("evidence-dashboard.md", EV_DASH), ("evidence-archive.md", EV_ARCHIVE)],
+          challenge=300)
+    wait_until(deadline_of("ls-clean", "challenge_deadline"), "ls-clean challenge end")
     write("clean-resolve", "resolve", ["ls-clean"])
     record = read("ls-clean")
     log.setdefault("audits", {})["ls-clean"] = record
@@ -203,7 +218,8 @@ def run():
     assert record["status"] == "RESOLVED" and record["result"]["verdict"] == "COMPLIANT", record
 
     # 3: violating subject (locks removed) -> VIOLATION
-    audit("violation", "ls-violation", "subject-bad.md", SUBJECT_BAD)
+    audit("violation", "ls-violation", "subject-bad.md", SUBJECT_BAD, challenge=300)
+    wait_until(deadline_of("ls-violation", "challenge_deadline"), "ls-violation challenge end")
     write("violation-resolve", "resolve", ["ls-violation"])
     record = read("ls-violation")
     log.setdefault("audits", {})["ls-violation"] = record
@@ -211,37 +227,38 @@ def run():
     assert record["status"] == "RESOLVED" and record["result"]["verdict"] == "VIOLATION", record
 
     # 4: thin (49-char) subject -> deterministic fail-closed INCONCLUSIVE
-    audit("inconclusive", "ls-thin", "subject-thin.md", SUBJECT_THIN)
+    audit("inconclusive", "ls-thin", "subject-thin.md", SUBJECT_THIN, challenge=300)
+    wait_until(deadline_of("ls-thin", "challenge_deadline"), "ls-thin challenge end")
     write("inconclusive-resolve", "resolve", ["ls-thin"])
     record = read("ls-thin")
     log.setdefault("audits", {})["ls-thin"] = record
     save(log)
     assert record["status"] == "RESOLVED" and record["result"]["verdict"] == "INCONCLUSIVE", record
 
-    # 5a: response-window guard on a 1h window — early resolve MUST revert.
-    # (A 60s window here is racy: multi-round consensus on a slow validator
-    # set can outlive it, executing the resolve legitimately after the
-    # deadline. One hour makes the guard deterministic under any consensus
-    # delay; the successful ls-dispute resolve at 60s already covers the
-    # post-deadline path.)
-    audit("guard", "ls-guard", "subject-ok.md", SUBJECT_OK, window=3600)
+    # 5a: response-window guard — early resolve MUST revert. The audit uses a
+    # 1h dispute window; we first wait out the 300s challenge period so the
+    # revert reason is provably the DISPUTE WINDOW (challenge already over),
+    # deterministic under any consensus delay.
+    audit("guard", "ls-guard", "subject-ok.md", SUBJECT_OK, window=3600, challenge=300)
     write("guard-mark", "open_dispute", ["ls-guard"])
     record = read("ls-guard")
     assert record["status"] == "DISPUTED" and record["dispute_deadline"] > 0, record
+    wait_until(deadline_of("ls-guard", "challenge_deadline"), "ls-guard challenge end")
     write("guard-early", "resolve", ["ls-guard"], expected_success=False)
     record = read("ls-guard")
     assert record["status"] == "DISPUTED", record
 
-    # 5b: dispute evidence + post-window resolution (60s minimum window).
-    audit("disp2", "ls-dispute2", "subject-ok.md", SUBJECT_OK, window=60)
+    # 5b: dispute evidence + post-window resolution (60s minimum window,
+    # 300s challenge period; wait covers BOTH deadlines before resolving).
+    audit("disp2", "ls-dispute2", "subject-ok.md", SUBJECT_OK, window=60, challenge=300)
     if read("ls-dispute2")["status"] == "OPEN":  # idempotent: an earlier uncertain send may have landed
         write("disp2-mark", "open_dispute", ["ls-dispute2"])
     record = read("ls-dispute2")
     assert record["status"] == "DISPUTED" and record["dispute_deadline"] > 0, record
     write("disp2-ev", "add_dispute_evidence", ["ls-dispute2", pinned("dispute-rebuttal.md"), sha(EV_REBUTTAL)])
-    print("waiting out the 60s dispute window...", flush=True)
-    while time.time() < record["dispute_deadline"] + 5:
-        time.sleep(5)
+    wait_until(max(deadline_of("ls-dispute2", "dispute_deadline"),
+                   deadline_of("ls-dispute2", "challenge_deadline")),
+               "ls-dispute2 window + challenge end")
     write("disp2-resolve", "resolve", ["ls-dispute2"])
     record = read("ls-dispute2")
     log.setdefault("audits", {})["ls-dispute2"] = record

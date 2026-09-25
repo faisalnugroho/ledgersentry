@@ -5,14 +5,14 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 ADDRESS = '0x' + 'a' * 40
 MOCK = '''window.GenLayerSDK={studionet:{},generatePrivateKey:()=>\"0xmock\",createAccount:()=>({address:\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}),createClient:()=>({request:async()=>true,readContract:async({functionName})=>JSON.stringify(functionName==='list_audits'?['ui-audit']:window.fixture),writeContract:async(args)=>{window.sent=args;if(window.failWrite)throw Error('network down');return '0x'+'b'.repeat(64)}})};'''
-fixture={'id':'ui-audit','title':'UI audit','owner':ADDRESS,'status':'RESOLVED','dispute_deadline':0,'window_seconds':3600,
+fixture={'id':'ui-audit','title':'UI audit','owner':ADDRESS,'status':'RESOLVED','dispute_deadline':0,'window_seconds':3600,'challenge_deadline':0,'challenge_seconds':86400,
  'requirements':['Requirement one about supply.','Requirement two about deployer.','Requirement three about locks.'],
  'subject':{'url':'https://raw.githubusercontent.com/example/repo/'+'a'*40+'/subject.md','digest':'c'*64},
  'evidence':[{'index':0,'url':'https://raw.githubusercontent.com/example/repo/'+'a'*40+'/dash.md','digest':'d'*64}],
  'dispute':[],
  'result':{'verdict':'COMPLIANT','labels':['PASS','PASS','PASS'],'reason':'Grounded test fixture only, not live consensus.',
-           'citations':[{'source':0,'quote':'Fixture subject text with a grounded citation quote.'}],
-           'manifest':[{'index':0,'bytes':120,'digest_ok':True},{'index':1,'bytes':90,'digest_ok':True}]}}
+           'citations':[{'source':0,'requirement':0,'quote':'Fixture subject text with a grounded citation quote.'}],
+           'manifest':[{'index':0,'bytes':120,'digest_ok':True,'truncated':False},{'index':1,'bytes':90,'digest_ok':True,'truncated':False}]}}
 results=[]
 with sync_playwright() as p:
  browser=p.chromium.launch(headless=True,args=['--no-sandbox'])

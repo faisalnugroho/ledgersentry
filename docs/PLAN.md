@@ -15,24 +15,33 @@ requirements) and a bounded dispute window (60 s–14 days, enforced on-chain
 from node-assigned time). Anyone may append up to 4 original evidence items
 (commit-pinned, digest-verified) while OPEN. Anyone may open a dispute: the
 record becomes DISPUTED with response_deadline = now + window, and up to 3
-dispute evidence items may be appended by any address. resolve() is
-permissionless but only proceeds once the deadline has passed — a guaranteed
-minimum answering period. Adjudication fetches subject + evidence with fair,
+dispute evidence items may be appended by any address. Every audit is also opened with an
+enforceable challenge period (challenge_deadline = now + challenge_seconds,
+300 s–14 days): resolve() reverts with challenge_period_active before it —
+disputed or not — so no audit can reach terminal resolution without a
+guaranteed intervention window. resolve() is
+permissionless and only proceeds once BOTH the challenge period and any
+dispute deadline have passed — guaranteed minimum answering periods. Adjudication fetches subject + evidence with fair,
 category-split budgets (subject ≤3000 chars, each original ≤3000, total
 original ≤12000, each dispute item ≤2000, total dispute ≤6000, hard total
 ≤21000 asserted at module level), verifies every SHA-256 byte commitment,
 then asks the model ONLY for per-requirement labels PASS/FAIL/UNCERTAIN with
-verbatim 20–400-char citations from fetched sources; PASS must cite source 0
-(the audited subject). The CONTRACT derives the verdict as a pure function:
+verbatim 20–400-char citations from fetched sources, each citation bound to
+the ONE requirement it supports (source + requirement index); PASS must cite
+source 0 (the audited subject), and every PASS/FAIL needs a citation whose
+quote lexically relates to its own requirement's text (deterministic
+word-overlap gate). The CONTRACT derives the verdict as a pure function:
 any FAIL → VIOLATION, any UNCERTAIN → INCONCLUSIVE, else COMPLIANT. Missing,
-unfetched, oversized or tampered sources can never produce PASS; subject
-unavailability fails closed to INCONCLUSIVE. The validator re-fetches,
+unfetched, oversized or tampered sources can never produce PASS; an
+oversized source is resolved INCOMPLETE (truncated: true, zero bytes judged —
+never audited as a prefix); subject unavailability or incompleteness fails
+closed to INCONCLUSIVE. The validator re-fetches,
 re-derives, compares stable substance (verdict, label sequence, evidence
 manifest) and re-normalizes the leader's full record against fresh bytes.
 Terminal records are immutable; no money moves anywhere in v1.
 
 Shared API (all writes return None; views JSON string):
-open_audit(audit_id, title, subject_uri, subject_digest, requirements_json, window_seconds)
+open_audit(audit_id, title, subject_uri, subject_digest, requirements_json, window_seconds, challenge_seconds)
 add_evidence(audit_id, url, digest)            # ORIGINAL category, OPEN only
 open_dispute(audit_id)                         # OPEN → DISPUTED, sets deadline
 add_dispute_evidence(audit_id, url, digest)    # DISPUTE category, DISPUTED only

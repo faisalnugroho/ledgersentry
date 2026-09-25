@@ -17,8 +17,9 @@ function updateActions() {
   $('#dispute-details').hidden = !open;
   $('#add-dispute-evidence-details').hidden = !disputed;
   $('#dispute').disabled = busy || !open;
-  $('#resolve').disabled = busy || (!open && !(disputed && record.dispute_deadline <= now));
-  $('#resolve').textContent = disputed && record.dispute_deadline > now ? 'Response window active' : open ? 'Resolve audit' : 'Resolve audit';
+  const challengeActive = record && record.challenge_deadline > now;
+  $('#resolve').disabled = busy || (!open && !(disputed && record.dispute_deadline <= now)) || (!open && !disputed && challengeActive);
+  $('#resolve').textContent = disputed && record.dispute_deadline > now ? 'Response window active' : (!open && !disputed && challengeActive) ? 'Challenge period active' : open ? 'Resolve audit' : 'Resolve audit';
 }
 async function action(fn) { if(busy) return; busy = true; document.querySelectorAll('button').forEach(b=>b.disabled=true); try { await fn(); } catch(e) { notice(e.message || String(e), true); } finally {busy=false; document.querySelectorAll('button').forEach(b=>b.disabled=false); updateActions();} }
 async function connect() { if (client) { notice('This tab already has a testnet signing session.'); return; } if (!SDK) throw Error('GenLayer SDK failed to load.'); let pk = sessionStorage.getItem('ledgersentry-burner'); if(!pk) {pk=SDK.generatePrivateKey();sessionStorage.setItem('ledgersentry-burner',pk);} account=SDK.createAccount(pk);client=SDK.createClient({chain:SDK.studionet,account});$('#wallet').textContent='Testnet burner: '+account.address+' · Session-only. Never send real assets.';$('#connect').textContent='Testnet session active';notice('Session active. Requesting testnet faucet…'); await client.request({method:'sim_fundAccount',params:[account.address,1e18]}); await loadAudits();notice('Testnet session ready. No real funds are involved.'); }
@@ -44,7 +45,7 @@ $('#connect').onclick=()=>action(connect);$('#refresh').onclick=()=>action(loadA
 $('#dispute').onclick=()=>action(()=>write('open_dispute',[selected],selected));
 $('#resolve').onclick=()=>action(()=>write('resolve',[selected],selected));
 $('#hash').onclick=()=>action(()=>{const f=$('#audit-form');return hashInput(f.elements.subject_uri,f.elements.subject_digest);});
-$('#audit-form').onsubmit=e=>{e.preventDefault();action(async()=>{const d=new FormData(e.target);let reqs;try{reqs=JSON.parse(d.get('requirements_json'));}catch(_){throw Error('Requirements must be a JSON array of strings.');}await write('open_audit',[d.get('id'),d.get('title'),d.get('subject_uri'),d.get('subject_digest'),JSON.stringify(reqs),Number(d.get('window_seconds'))],d.get('id'));});};
+$('#audit-form').onsubmit=e=>{e.preventDefault();action(async()=>{const d=new FormData(e.target);let reqs;try{reqs=JSON.parse(d.get('requirements_json'));}catch(_){throw Error('Requirements must be a JSON array of strings.');}await write('open_audit',[d.get('id'),d.get('title'),d.get('subject_uri'),d.get('subject_digest'),JSON.stringify(reqs),Number(d.get('window_seconds')),Number(d.get('challenge_seconds'))],d.get('id'));});};
 $('#ev-hash').onclick=()=>action(()=>{const f=$('#evidence-form');return hashInput(f.elements.url,f.elements.digest);});
 $('#evidence-form').onsubmit=e=>{e.preventDefault();action(async()=>{const d=new FormData(e.target);await write('add_evidence',[selected,d.get('url'),d.get('digest')],selected);});};
 $('#de-hash').onclick=()=>action(()=>{const f=$('#dispute-evidence-form');return hashInput(f.elements.url,f.elements.digest);});

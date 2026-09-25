@@ -54,3 +54,25 @@ reproducible driver and never re-sends an uncertain write.
 
 - pytest tests/ -v : 72 passed (direct mode, GenVM runner v0.3.0-rc7)
 - genvm-lint check : ok=true, lint passed=3, validate ok=true, 7 methods
+
+## v1.1 steward-remediation round (September 2026, pre-redeploy)
+
+Steward findings R1 (universal challenge period), R2 (per-requirement
+citation validation), R3 (oversized sources resolved incomplete, never
+prefix-audited) implemented in `contracts/ledgersentry.py`; direct-mode
+suite extended 72 → 94 tests covering pre-deadline resolution, unrelated /
+cross-requirement citations, and contradictory-or-oversized sources beyond
+the analysis budget. Fresh local evidence for THIS candidate:
+
+- pytest tests/ -q : 94 passed (full output re-executed after the final
+  contract/test edits; GenVM runner v0.3.0-rc7 via gltest direct mode)
+- genvm-lint check contracts/ledgersentry.py --json : validate.ok = true,
+  0 errors, 0 warnings
+- frontend: `node --check frontend/app.js` clean; mocked-SDK browser
+  integration (`scripts/browser_test.py`) BROWSER_TEST_PASS at 1440 and
+  390 widths with the v1.1 record shape (challenge fields, truncated
+  manifest flags, requirement-bound citations)
+- Live re-deploy + re-smoke on the new source: see the Redeploy section
+  (appended after the v1.0 tables below once the new deployment receipt
+  exists). v1.0 transaction evidence above remains valid for the contract
+  version it exercised (commit `2ecf05c…`) and is retained as history.

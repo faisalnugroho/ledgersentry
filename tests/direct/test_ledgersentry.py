@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 import sys
+from datetime import datetime, timezone
 import pytest
 
 OWNER = 'https://raw.githubusercontent.com/example/artifacts/' + 'a' * 40 + '/'
@@ -19,6 +20,15 @@ EV1 = ('Independent dashboard mirrors the supply of 1,000,000 and 18 decimals '
 EV2 = ('Archive snapshot shows the deployer address 0xabc registered on 2026-01-05.')
 FUTURE = '2027-01-01T00:00:00.000000Z'
 QUOTE = 'total supply is 1,000,000 with 18 decimals'
+SUBJECT_BUDGET = 3000  # mirrors contracts/ledgersentry.py
+# Per-requirement subject citations: each label stands on its own on-topic quote.
+CITES_FULL = [
+    {'source': 0, 'requirement': 0, 'quote': QUOTE},
+    {'source': 0, 'requirement': 1, 'quote': 'Deployer is 0xabc deployed on 2026-01-05'},
+    {'source': 0, 'requirement': 2, 'quote': 'Locks: team 40% released 2027-01-05'},
+]
+# A correct quote backing the WRONG requirement (deployer quote offered for req 0).
+UNRELATED_CITE = {'source': 0, 'requirement': 0, 'quote': 'Deployer is 0xabc deployed on 2026-01-05'}
 
 
 def URL(i):
@@ -42,13 +52,18 @@ def warp(vm, iso=FUTURE):
     sys.modules['genlayer.gl'].message_raw['datetime'] = iso
 
 
+def epoch(iso):
+    return datetime.strptime(iso, '%Y-%m-%dT%H:%M:%S.%f%z').timestamp()
+
+
 @pytest.fixture
 def c(direct_deploy):
     return direct_deploy('contracts/ledgersentry.py')
 
 
-def open_default(c, aid='audit-1', window=3600, subject=SUBJECT):
-    c.open_audit(aid, 'Token disclosure', URL(0), sha(subject), reqs_json(), window)
+def open_default(c, aid='audit-1', window=3600, subject=SUBJECT, challenge=3000):
+    c.open_audit(aid, 'Token disclosure', URL(0), sha(subject), reqs_json(),
+                 window, challenge)
     return aid
 
 
@@ -67,10 +82,9 @@ def mock_sources(vm, subject=SUBJECT, evidence=(), dispute=(), statuses=None):
 def model(req_count, labels=None, reason='The subject demonstrates each requirement in order.',
           citations=None):
     labels = labels or ['PASS'] * req_count
-    return {'labels': labels, 'reason': reason, 'citations': citations or []}
-
-
-SUBJECT_CITE = [{'source': 0, 'quote': QUOTE}]
+    if citations is None:
+        citations = CITES_FULL if req_count == 3 else []
+    return {'labels': labels, 'reason': reason, 'citations': citations}
 
 
 def resolve(c, vm, aid='audit-1', subject=SUBJECT, evidence=(), dispute=(),
@@ -89,16 +103,20 @@ def resolve(c, vm, aid='audit-1', subject=SUBJECT, evidence=(), dispute=(),
     ('title', '  ', 'invalid_title'), ('title', 'a' * 121, 'invalid_title'),
     ('window', 0, 'invalid_window'), ('window', -5, 'invalid_window'),
     ('window', 59, 'invalid_window'), ('window', 1209601, 'invalid_window'),
+    ('challenge', 0, 'invalid_challenge'), ('challenge', -1, 'invalid_challenge'),
+    ('challenge', 299, 'invalid_challenge'), ('challenge', 1209601, 'invalid_challenge'),
+    ('challenge', True, 'invalid_challenge'), ('challenge', '600', 'invalid_challenge'),
     ('digest', 'abc', 'invalid_digest'), ('digest', 'A' * 64, 'invalid_digest'),
     ('digest', 'g' * 64, 'invalid_digest'), ('digest', 'a' * 63, 'invalid_digest'),
 ])
 def test_open_audit_validation(c, direct_vm, field, value, reason):
     args = {'aid': 'audit-x', 'title': 'Token disclosure', 'uri': URL(0),
-            'digest': sha(SUBJECT), 'reqs': reqs_json(), 'window': 3600}
+            'digest': sha(SUBJECT), 'reqs': reqs_json(), 'window': 3600,
+            'challenge': 3600}
     args[field] = value
     with direct_vm.expect_revert(reason):
         c.open_audit(args['aid'], args['title'], args['uri'], args['digest'],
-                     args['reqs'], args['window'])
+                     args['reqs'], args['window'], args['challenge'])
 
 
 @pytest.mark.parametrize('reqs,reason', [
@@ -112,7 +130,7 @@ def test_requirements_validation(c, direct_vm, reqs, reason):
     with direct_vm.expect_revert(reason):
         c.open_audit('audit-x', 'Title here', URL(0), sha(SUBJECT),
                      json.dumps(reqs) if not isinstance(reqs, list) else json.dumps(reqs),
-                     3600)
+                     3600, 3600)
 
 
 @pytest.mark.parametrize('uri', [
@@ -125,7 +143,7 @@ def test_requirements_validation(c, direct_vm, reqs, reason):
 ])
 def test_url_allowlist(c, direct_vm, uri):
     with direct_vm.expect_revert('invalid_'):
-        c.open_audit('audit-x', 'Title here', uri, sha(SUBJECT), reqs_json(), 3600)
+        c.open_audit('audit-x', 'Title here', uri, sha(SUBJECT), reqs_json(), 3600, 3600)
 
 
 def test_open_duplicate_and_unknown(c, direct_vm):
@@ -139,9 +157,9 @@ def test_open_duplicate_and_unknown(c, direct_vm):
 def test_registry_capacity(c, direct_vm):
     for i in range(100):
         c.open_audit('r-' + str(i), 'Title ' + str(i), URL(0), sha(SUBJECT),
-                     reqs_json(), 3600)
+                     reqs_json(), 3600, 300)
     with direct_vm.expect_revert('registry_full'):
-        c.open_audit('r-100', 'Title 100', URL(0), sha(SUBJECT), reqs_json(), 3600)
+        c.open_audit('r-100', 'Title 100', URL(0), sha(SUBJECT), reqs_json(), 3600, 300)
 
 
 # ---------- evidence lifecycle ----------
@@ -190,6 +208,49 @@ def test_state_machine_categories(c, direct_vm):
     assert record['dispute'][0]['url'] == URL(4)
 
 
+# ---------- challenge period (universal, pre-deadline resolution) ----------
+
+def test_open_audit_writes_immutable_challenge_deadline(c, direct_vm):
+    warp(direct_vm)  # pin the node clock so the deadline math is exact
+    open_default(c, challenge=3600)
+    record = get(c, 'audit-1')
+    assert record['challenge_seconds'] == 3600
+    assert record['challenge_deadline'] > 1700000000
+    # Deterministic honest-clock math: now + 3600 (+/-1s of drift).
+    assert abs(record['challenge_deadline'] - (epoch(FUTURE) + 3600)) <= 1
+
+
+def test_resolve_before_challenge_deadline_reverts(c, direct_vm):
+    open_default(c, challenge=3600)
+    mock_sources(direct_vm)
+    direct_vm.mock_llm('.*', json.dumps(model(3)))
+    with direct_vm.expect_revert('challenge_period_active'):
+        c.resolve('audit-1')
+    record = get(c, 'audit-1')
+    assert record['status'] == 'OPEN'
+    assert record['result'] == {}
+
+
+def test_resolve_after_challenge_deadline_succeeds(c, direct_vm):
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm)
+    assert record['status'] == 'RESOLVED'
+    assert record['result']['verdict'] == 'COMPLIANT'
+
+
+def test_dispute_restarts_full_window_after_challenge_expiry(c, direct_vm):
+    open_default(c, window=3600, challenge=300)
+    warp(direct_vm)  # challenge period has fully expired
+    c.open_dispute('audit-1')
+    record = get(c, 'audit-1')
+    assert record['status'] == 'DISPUTED'
+    # A dispute AFTER challenge expiry still buys a FULL fresh window.
+    assert abs(record['dispute_deadline'] - (epoch(FUTURE) + 3600)) <= 1
+    with direct_vm.expect_revert('response_window_active'):
+        c.resolve('audit-1')
+
+
 # ---------- dispute window ----------
 
 def test_open_dispute_sets_deadline(c, direct_vm):
@@ -201,9 +262,10 @@ def test_open_dispute_sets_deadline(c, direct_vm):
 
 
 def test_resolve_blocked_during_window(c, direct_vm):
-    open_default(c, window=3600)
+    open_default(c, window=3600, challenge=300)
+    warp(direct_vm)  # challenge period over; only the dispute window blocks
     mock_sources(direct_vm)
-    direct_vm.mock_llm('.*', json.dumps(model(3, citations=SUBJECT_CITE)))
+    direct_vm.mock_llm('.*', json.dumps(model(3)))
     c.open_dispute('audit-1')
     with direct_vm.expect_revert('response_window_active'):
         c.resolve('audit-1')
@@ -212,10 +274,19 @@ def test_resolve_blocked_during_window(c, direct_vm):
     assert record['result'] == {}
 
 
+def test_resolve_while_challenge_active_and_disputed_reverts(c, direct_vm):
+    open_default(c, window=60, challenge=7200)
+    c.open_dispute('audit-1')
+    mock_sources(direct_vm)
+    direct_vm.mock_llm('.*', json.dumps(model(3)))
+    with direct_vm.expect_revert('challenge_period_active'):
+        c.resolve('audit-1')
+
+
 def test_resolve_allowed_after_window(c, direct_vm):
-    open_default(c, window=60)
+    open_default(c, window=60, challenge=300)
     warp(direct_vm)
-    record = resolve(c, direct_vm, output=model(3, citations=SUBJECT_CITE))
+    record = resolve(c, direct_vm)
     assert record['status'] == 'RESOLVED'
     assert record['result']['verdict'] == 'COMPLIANT'
 
@@ -226,7 +297,7 @@ def test_double_dispute_and_resolution_terminality(c, direct_vm):
     with direct_vm.expect_revert('audit_not_open'):
         c.open_dispute('audit-1')
     warp(direct_vm)
-    resolve(c, direct_vm, output=model(3, citations=SUBJECT_CITE))
+    resolve(c, direct_vm, output=model(3, citations=CITES_FULL))
     with direct_vm.expect_revert('already_resolved'):
         c.resolve('audit-1')
     with direct_vm.expect_revert('audit_not_open'):
@@ -236,10 +307,11 @@ def test_double_dispute_and_resolution_terminality(c, direct_vm):
 # ---------- resolve decision matrix ----------
 
 def test_compliant_happy_path(c, direct_vm):
-    open_default(c)
+    open_default(c, challenge=300)
+    warp(direct_vm)
     c.add_evidence('audit-1', URL(1), sha(EV1))
     record = resolve(c, direct_vm, evidence=[EV1],
-                     output=model(3, citations=SUBJECT_CITE))
+                     output=model(3, citations=CITES_FULL))
     assert record['status'] == 'RESOLVED'
     assert record['result']['verdict'] == 'COMPLIANT'
     assert record['result']['labels'] == ['PASS', 'PASS', 'PASS']
@@ -255,8 +327,9 @@ def test_compliant_happy_path(c, direct_vm):
     (['FAIL', 'UNCERTAIN', 'PASS'], 'VIOLATION'),
 ])
 def test_contract_derives_verdict(c, direct_vm, labels, verdict):
-    open_default(c)
-    record = resolve(c, direct_vm, output=model(3, labels, citations=SUBJECT_CITE))
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, output=model(3, labels, citations=CITES_FULL))
     assert record['result']['verdict'] == verdict
     assert record['result']['labels'] == labels
 
@@ -264,32 +337,35 @@ def test_contract_derives_verdict(c, direct_vm, labels, verdict):
 # ---------- fail-closed evidence gates ----------
 
 def test_pass_without_subject_citation_rejected(c, direct_vm):
-    open_default(c)
-    record = resolve(c, direct_vm, output=model(3))  # citations []
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, output=model(3, citations=[]))
     assert record['result']['verdict'] == 'INCONCLUSIVE'
 
 
 def test_dead_subject_never_passes(c, direct_vm):
     thin = 'This placeholder page intentionally left empty.'
-    open_default(c, subject=thin)
+    open_default(c, subject=thin, challenge=300)
+    warp(direct_vm)
     record = resolve(c, direct_vm, subject=thin, output=model(3, citations=[
-        {'source': 0, 'quote': 'placeholder page intentionally left empty.'}]))
+        {'source': 0, 'requirement': 0,
+         'quote': 'placeholder page intentionally left empty.'}]))
     assert record['result']['verdict'] == 'INCONCLUSIVE'
     assert record['result']['manifest'][0]['digest_ok'] is False
 
 
 def test_subject_fetch_failure_fails_closed(c, direct_vm):
-    open_default(c)
-    record = resolve(c, direct_vm, statuses={0: 404},
-                     output=model(3, citations=SUBJECT_CITE))
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, statuses={0: 404}, output=model(3))
     assert record['result']['verdict'] == 'INCONCLUSIVE'
     assert record['result']['manifest'][0]['digest_ok'] is False
 
 
 def test_tampered_subject_detected(c, direct_vm):
-    open_default(c)
-    record = resolve(c, direct_vm, subject=SUBJECT + ' tampered',
-                     output=model(3, citations=SUBJECT_CITE))
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, subject=SUBJECT + ' tampered', output=model(3))
     assert record['result']['verdict'] == 'INCONCLUSIVE'
     assert record['result']['manifest'][0]['digest_ok'] is False
 
@@ -297,52 +373,185 @@ def test_tampered_subject_detected(c, direct_vm):
 def test_unfetched_dispute_cannot_force_pass(c, direct_vm):
     open_default(c)
     mock_sources(direct_vm)
-    direct_vm.mock_llm('.*', json.dumps(model(3, citations=SUBJECT_CITE)))
+    direct_vm.mock_llm('.*', json.dumps(model(3)))
     c.open_dispute('audit-1')
     c.add_dispute_evidence('audit-1', URL(4), sha(EV1))
     warp(direct_vm)
-    record = resolve(c, direct_vm, dispute=[], output=model(3, citations=SUBJECT_CITE))
+    record = resolve(c, direct_vm, dispute=[])
     assert record['result']['verdict'] == 'INCONCLUSIVE'
+
+
+# ---------- steward finding: oversized sources resolved incomplete ----------
+
+def test_oversized_subject_resolved_incomplete_never_prefix_audited(c, direct_vm):
+    bloated = ('Token LAUNCH total supply is 1,000,000 with 18 decimals. ' +
+               'Filler padding sentence. ' * 400)
+    assert len(bloated.encode()) > SUBJECT_BUDGET
+    open_default(c, subject=bloated, challenge=300)
+    warp(direct_vm)
+    # The model claims PASS with in-prefix quotes — the source is still
+    # unauditable: resolved as incomplete, never judged from a prefix.
+    record = resolve(c, direct_vm, subject=bloated, output=model(3, citations=[
+        {'source': 0, 'requirement': 0, 'quote': QUOTE},
+        {'source': 0, 'requirement': 1,
+         'quote': 'Deployer is 0xabc deployed on 2026-01-05'},
+        {'source': 0, 'requirement': 2,
+         'quote': 'Locks: team 40% released 2027-01-05'}]))
+    assert record['result']['verdict'] == 'INCONCLUSIVE'
+    entry = record['result']['manifest'][0]
+    assert entry['digest_ok'] is True and entry['truncated'] is True
+    assert entry['bytes'] == 0
+    assert record['result']['citations'] == []
+
+
+def test_oversized_evidence_resolved_incomplete(c, direct_vm):
+    bloated = EV1 + ' Extra padding text. ' * 2000
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    c.add_evidence('audit-1', URL(1), sha(bloated))
+    record = resolve(c, direct_vm, evidence=[bloated], output=model(3))
+    assert record['result']['verdict'] == 'INCONCLUSIVE'
+    entry = record['result']['manifest'][1]
+    assert entry['digest_ok'] is True and entry['truncated'] is True
+    assert entry['bytes'] == 0
+
+
+def test_exact_budget_source_audited_in_full(c, direct_vm):
+    # Normal sources are fetched whole and never marked truncated.
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm)
+    entry = record['result']['manifest'][0]
+    assert entry['digest_ok'] is True and entry['truncated'] is False
+    assert entry['bytes'] == len(SUBJECT)
+    assert record['result']['verdict'] == 'COMPLIANT'
+
+
+# ---------- steward finding: per-requirement citation enforcement ----------
+
+def test_label_backed_by_unrelated_requirement_citation_rejected(c, direct_vm):
+    # Every citation is verbatim-grounded, but req 0's only citation is the
+    # DEPLOYER quote — it belongs to requirement 1's topic, not req 0's.
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, output=model(3, citations=[
+        {'source': 0, 'requirement': 0,
+         'quote': 'Deployer is 0xabc deployed on 2026-01-05'},
+        CITES_FULL[1], CITES_FULL[2]]))
+    assert record['result']['verdict'] == 'INCONCLUSIVE'
+    assert record['result']['citations'] == []
+
+
+def test_cross_requirement_citation_cannot_support_label(c, direct_vm):
+    # The supply quote is tagged as requirement 2's citation (locks): even a
+    # genuinely grounded quote cannot carry a foreign requirement's label.
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, output=model(3, citations=[
+        {'source': 0, 'requirement': 2, 'quote': QUOTE},
+        CITES_FULL[1], CITES_FULL[2]]))
+    assert record['result']['verdict'] == 'INCONCLUSIVE'
+
+
+def test_each_label_with_own_on_topic_citation_passes(c, direct_vm):
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, output=model(3))
+    assert record['result']['verdict'] == 'COMPLIANT'
+    assert record['result']['citations'] == CITES_FULL
+
+
+def test_fail_label_also_needs_related_citation(c, direct_vm):
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, output=model(
+        3, ['FAIL', 'PASS', 'PASS'], citations=[
+            {'source': 0, 'requirement': 0,
+             'quote': 'Deployer is 0xabc deployed on 2026-01-05'},
+            CITES_FULL[1], CITES_FULL[2]]))
+    assert record['result']['verdict'] == 'INCONCLUSIVE'
+
+
+def test_uncertain_label_needs_no_citation(c, direct_vm):
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, output=model(
+        3, ['PASS', 'PASS', 'UNCERTAIN'], citations=CITES_FULL[:2]))
+    assert record['result']['verdict'] == 'INCONCLUSIVE'  # UNCERTAIN present
+    assert len(record['result']['citations']) == 2
+
+
+def test_citation_requirement_out_of_range_rejected(c, direct_vm):
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    bad = [dict(cite, requirement=3) for cite in CITES_FULL]
+    record = resolve(c, direct_vm, output=model(3, citations=bad))
+    assert record['result']['verdict'] == 'INCONCLUSIVE'
+
+
+def test_citation_requirement_wrong_type_rejected(c, direct_vm):
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    bad = [dict(CITES_FULL[0], requirement='0')] + CITES_FULL[1:]
+    record = resolve(c, direct_vm, output=model(3, citations=bad))
+    assert record['result']['verdict'] == 'INCONCLUSIVE'
+
+
+def test_validator_rejects_forged_citation_requirement(c, direct_vm):
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, output=model(3))
+    forged = json.loads(json.dumps(record['result']))
+    forged['citations'][0]['requirement'] = 1
+    outcome = direct_vm.run_validator(leader_result=forged)
+    assert outcome is False
 
 
 # ---------- model shape / grounding ----------
 
 @pytest.mark.parametrize('output,expect_verdict', [
-    (model(2, citations=SUBJECT_CITE), 'INCONCLUSIVE'),
+    (model(2), 'INCONCLUSIVE'),
     (model(3, ['pass', 'PASS', 'PASS']), 'INCONCLUSIVE'),
     ({'labels': ['PASS'] * 3}, 'INCONCLUSIVE'),
     (model(3, reason='short'), 'INCONCLUSIVE'),
     ({'labels': ['PASS'] * 3, 'reason': 'r' * 30, 'citations': 'no'}, 'INCONCLUSIVE'),
-    (model(3, citations=[{'source': 0, 'quote': 'too short'}]), 'INCONCLUSIVE'),
-    (model(3, citations=[{'source': 9, 'quote': 'x' * 40}]), 'INCONCLUSIVE'),
+    (model(3, citations=[{'source': 0, 'requirement': 0, 'quote': 'too short'}]),
+     'INCONCLUSIVE'),
+    (model(3, citations=[{'source': 9, 'requirement': 0, 'quote': 'x' * 40}]),
+     'INCONCLUSIVE'),
     ('not-json-at-all', 'INCONCLUSIVE'),
 ])
 def test_model_shape_fail_safe(c, direct_vm, output, expect_verdict):
-    open_default(c)
+    open_default(c, challenge=300)
+    warp(direct_vm)
     record = resolve(c, direct_vm, output=output)
     assert record['result']['verdict'] == expect_verdict
 
 
 def test_grounded_citation_kept(c, direct_vm):
-    open_default(c)
-    record = resolve(c, direct_vm, output=model(3, citations=SUBJECT_CITE))
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, output=model(3))
     assert record['result']['verdict'] == 'COMPLIANT'
     assert record['result']['citations'][0]['source'] == 0
     assert record['result']['citations'][0]['quote'] == QUOTE
 
 
 def test_ungrounded_quote_rejected(c, direct_vm):
-    open_default(c)
+    open_default(c, challenge=300)
+    warp(direct_vm)
     record = resolve(c, direct_vm, output=model(3, citations=[
-        {'source': 0, 'quote': 'this exact sentence never appears in subject'}]))
+        {'source': 0, 'requirement': 0,
+         'quote': 'this exact sentence never appears in subject'}]))
     assert record['result']['verdict'] == 'INCONCLUSIVE'
 
 
 def test_llm_cannot_pick_verdict_field(c, direct_vm):
-    open_default(c)
+    open_default(c, challenge=300)
+    warp(direct_vm)
     output = {'verdict': 'COMPLIANT', 'labels': ['FAIL', 'FAIL', 'FAIL'],
               'reason': 'The model tries to smuggle a verdict field through.',
-              'citations': SUBJECT_CITE}
+              'citations': CITES_FULL}
     record = resolve(c, direct_vm, output=output)
     assert record['result']['verdict'] == 'VIOLATION'
 
@@ -350,17 +559,19 @@ def test_llm_cannot_pick_verdict_field(c, direct_vm):
 # ---------- consensus equivalence: forged / divergent leaders ----------
 
 def test_validator_accepts_honest_leader(c, direct_vm):
-    open_default(c)
+    open_default(c, challenge=300)
+    warp(direct_vm)
     c.add_evidence('audit-1', URL(1), sha(EV1))
-    record = resolve(c, direct_vm, evidence=[EV1], output=model(3, citations=SUBJECT_CITE))
+    record = resolve(c, direct_vm, evidence=[EV1], output=model(3, citations=CITES_FULL))
     outcome = direct_vm.run_validator(leader_result=record['result'])
     assert outcome is True
 
 
 def test_forged_leader_label_rejected(c, direct_vm):
-    open_default(c)
+    open_default(c, challenge=300)
+    warp(direct_vm)
     c.add_evidence('audit-1', URL(1), sha(EV1))
-    record = resolve(c, direct_vm, evidence=[EV1], output=model(3, citations=SUBJECT_CITE))
+    record = resolve(c, direct_vm, evidence=[EV1], output=model(3, citations=CITES_FULL))
     forged = json.loads(json.dumps(record['result']))
     forged['labels'] = ['PASS', 'FAIL', 'PASS']
     outcome = direct_vm.run_validator(leader_result=forged)
@@ -368,8 +579,9 @@ def test_forged_leader_label_rejected(c, direct_vm):
 
 
 def test_forged_leader_verdict_rejected(c, direct_vm):
-    open_default(c)
-    record = resolve(c, direct_vm, output=model(3, citations=SUBJECT_CITE))
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, output=model(3, citations=CITES_FULL))
     forged = json.loads(json.dumps(record['result']))
     forged['verdict'] = 'VIOLATION'
     outcome = direct_vm.run_validator(leader_result=forged)
@@ -377,8 +589,9 @@ def test_forged_leader_verdict_rejected(c, direct_vm):
 
 
 def test_forged_manifest_rejected(c, direct_vm):
-    open_default(c)
-    record = resolve(c, direct_vm, output=model(3, citations=SUBJECT_CITE))
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, output=model(3, citations=CITES_FULL))
     forged = json.loads(json.dumps(record['result']))
     forged['manifest'][0]['digest_ok'] = False
     outcome = direct_vm.run_validator(leader_result=forged)
@@ -386,12 +599,13 @@ def test_forged_manifest_rejected(c, direct_vm):
 
 
 def test_divergent_fetch_rejected(c, direct_vm):
-    open_default(c)
-    record = resolve(c, direct_vm, output=model(3, citations=SUBJECT_CITE))
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, output=model(3, citations=CITES_FULL))
     honest = json.loads(json.dumps(record['result']))
     direct_vm.clear_mocks()
     direct_vm.mock_web(re.escape(URL(0)) + '$', {'status': 200, 'body': SUBJECT + ' mutated'})
-    direct_vm.mock_llm('.*', json.dumps(model(3, citations=SUBJECT_CITE)))
+    direct_vm.mock_llm('.*', json.dumps(model(3, citations=CITES_FULL)))
     outcome = direct_vm.run_validator(leader_result=honest)
     assert outcome is False
 
@@ -399,11 +613,15 @@ def test_divergent_fetch_rejected(c, direct_vm):
 # ---------- budget fairness (prompt-spy) ----------
 
 def test_budget_order_in_prompt(c, direct_vm):
-    open_default(c)
+    open_default(c, challenge=300)
+    warp(direct_vm)
     for i in range(4):
         c.add_evidence('audit-1', URL(i + 1), sha(EV1 + str(i)))
+    c.open_dispute('audit-1')
+    c.add_dispute_evidence('audit-1', URL(5), sha(EV2))
+    warp(direct_vm, iso='2027-01-01T02:00:00.000000Z')  # past window end
     mock_sources(direct_vm, evidence=[EV1 + str(i) for i in range(4)], dispute=[EV2])
-    direct_vm.mock_llm('.*', json.dumps(model(3, citations=SUBJECT_CITE)))
+    direct_vm.mock_llm('.*', json.dumps(model(3, citations=CITES_FULL)))
     seen = []
     original = direct_vm._match_llm_mock
 
@@ -412,9 +630,6 @@ def test_budget_order_in_prompt(c, direct_vm):
         return original(prompt)
 
     direct_vm._match_llm_mock = spy
-    c.open_dispute('audit-1')
-    c.add_dispute_evidence('audit-1', URL(5), sha(EV2))
-    warp(direct_vm)
     c.resolve('audit-1')
     direct_vm._match_llm_mock = original
     assert len(seen) >= 1
@@ -426,11 +641,12 @@ def test_budget_order_in_prompt(c, direct_vm):
 
 
 def test_budget_invariant_holds(c, direct_vm):
-    open_default(c)
+    open_default(c, challenge=300)
+    warp(direct_vm)
     for i in range(4):
         c.add_evidence('audit-1', URL(i + 1), sha(EV1 + str(i)))
     record = resolve(c, direct_vm, evidence=[EV1 + str(i) for i in range(4)],
-                     output=model(3, citations=SUBJECT_CITE))
+                     output=model(3, citations=CITES_FULL))
     manifest = record['result']['manifest']
     assert len(manifest) == 5
     assert all(item['digest_ok'] for item in manifest)
@@ -439,8 +655,9 @@ def test_budget_invariant_holds(c, direct_vm):
 
 
 def test_manifest_counts_fetched_bytes(c, direct_vm):
-    open_default(c)
-    record = resolve(c, direct_vm, output=model(3, citations=SUBJECT_CITE))
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, output=model(3, citations=CITES_FULL))
     manifest = record['result']['manifest']
     assert manifest[0]['bytes'] == len(SUBJECT)
     assert manifest[0]['digest_ok'] is True
@@ -449,9 +666,10 @@ def test_manifest_counts_fetched_bytes(c, direct_vm):
 # ---------- immutability + listing ----------
 
 def test_record_immutability_after_resolution(c, direct_vm):
-    open_default(c)
+    open_default(c, challenge=300)
+    warp(direct_vm)
     before = get(c, 'audit-1')
-    resolve(c, direct_vm, output=model(3, citations=SUBJECT_CITE))
+    resolve(c, direct_vm, output=model(3, citations=CITES_FULL))
     after = get(c, 'audit-1')
     assert before['evidence'] == after['evidence']
     assert before['subject'] == after['subject']

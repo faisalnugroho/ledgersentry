@@ -26,35 +26,48 @@ is accepted.
 - **Judgment, not classification** — the model interprets each natural-language
   requirement against the artifact and evidence; `if/else` cannot do this.
 - **LLM labels, contract derives** — the model returns only per-requirement
-  PASS/FAIL/UNCERTAIN labels with verbatim grounded citations. The verdict is
-  a pure contract function: any FAIL → VIOLATION, any UNCERTAIN → INCONCLUSIVE,
-  all PASS with every source verified → COMPLIANT.
+  PASS/FAIL/UNCERTAIN labels with verbatim grounded citations, each bound to
+  the ONE requirement it supports. The verdict is a pure contract function:
+  any FAIL → VIOLATION, any UNCERTAIN → INCONCLUSIVE, all PASS with every
+  source verified → COMPLIANT.
 - **Real on-chain consequence** — terminal on-chain status with an immutable
-  auditable record; dispute deadline computed from the node-assigned clock.
+  auditable record; challenge and dispute deadlines computed from the
+  node-assigned clock.
 - **Independently verifiable evidence** — every source is a commit-pinned
   `raw.githubusercontent.com` URL whose SHA-256 digest is committed at write
   time; validators re-fetch and re-check every byte.
-- **Deterministic gates clamp the model** — the hard gate `pass_without_subject_citation`
-  rejects any PASS not grounded in the subject; the grounding clamp treats a
-  fetched subject thinner than 50 chars as unusable; a definitive COMPLIANT
-  requires *every* committed source to be present and verified. A fooled or
+- **Deterministic gates clamp the model** — the hard gate
+  `pass_without_subject_citation` rejects any PASS not grounded in the
+  subject; `label_without_related_citation` rejects any PASS/FAIL whose own
+  citations do not lexically relate to that requirement's text (verbatim
+  word overlap, deterministic); the grounding clamp treats a fetched subject
+  thinner than 50 chars as unusable; an oversized source is resolved as
+  INCOMPLETE (never audited as a prefix); a definitive COMPLIANT requires
+  *every* committed source to be present, verified and complete. A fooled or
   hallucinating model cannot produce a clean audit.
 
-## Dispute path (first-class from v1)
+## Challenge period + dispute path (first-class from v1.1)
 
+- EVERY audit is opened with an enforceable **challenge period**
+  (300 s–14 days): `challenge_deadline = now + challenge_seconds` is written
+  at `open_audit` from the node clock, and `resolve()` reverts with
+  `challenge_period_active` before it — disputed or not. No audit can reach
+  terminal resolution without a guaranteed window for anyone to intervene.
 - Anyone may dispute an OPEN audit; the record becomes DISPUTED with
   `dispute_deadline = now + window` from the **node-assigned** (non-manipulable)
-  timestamp, parsed with pure integer math (Hinnant `days_from_civil`).
-- `resolve()` is permissionless but **reverts while the window is active** — a
-  guaranteed minimum answering period, not a submission cutoff: dispute
-  evidence stays acceptable until resolution; later items remain
-  hash-committed and auditable.
+  timestamp, parsed with pure integer math (Hinnant `days_from_civil`). A
+  dispute always buys a FULL fresh window — even one opened after the
+  challenge period expired.
+- `resolve()` is permissionless but **reverts while either the challenge
+  period or the dispute window is active** — a guaranteed minimum answering
+  period, not a submission cutoff: dispute evidence stays acceptable until
+  resolution; later items remain hash-committed and auditable.
 - Blank dispute openings are allowed (the subject always exists; dispute
   evidence itself is rejected when empty per call).
-- Fair fetch budgets are split by category from record metadata — subject 3000
-  chars, originals ≤3000 each (≤12000 total), dispute items ≤2000 each (≤6000
-  total), 21000 hard cap asserted at module load — so appending dispute items
-  can never starve the original evidence.
+- Fair fetch budgets are split by category from record metadata — subject
+  3000 chars, originals ≤3000 each (≤12000 total), dispute items ≤2000 each
+  (≤6000 total), 21000 hard cap asserted at module load — so appending
+  dispute items can never starve the original evidence.
 
 ## Honest scope
 
@@ -63,6 +76,9 @@ is accepted.
 - Open participation is not Sybil-resistant.
 - LLM labels can be wrong; INCONCLUSIVE is a first-class outcome.
 - One dispute round per audit; escalation means opening a fresh audit.
+- The per-requirement citation gate is a deterministic lexical-overlap check,
+  not semantic understanding: an on-topic-looking quote can still be cherry-
+  picked, and paraphrases may fall below the overlap threshold.
 - First-party security review only (`docs/AUDIT.md`), not an external audit.
 - Testnet prototype: no funds, no payments, no token anywhere.
 
@@ -70,7 +86,7 @@ is accepted.
 
 ```
 contracts/ledgersentry.py   Intelligent Contract (GenVM, gl.Contract)
-tests/direct/               72 real GenVM direct-mode tests (web/LLM mocked)
+tests/direct/               94 real GenVM direct-mode tests (web/LLM mocked)
 frontend/                   Static dashboard (GitHub Pages, testnet boundary)
 scripts/                    Deploy + live smoke + readback (genlayer-py)
 docs/                       PLAN, SPEC_REVIEW, AUDIT, VERIFICATION, SUBMISSION_DRAFT
@@ -80,7 +96,7 @@ docs/                       PLAN, SPEC_REVIEW, AUDIT, VERIFICATION, SUBMISSION_D
 
 ```bash
 python3.12 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest tests/ -v        # 72 tests
+.venv/bin/python -m pytest tests/ -v        # 94 tests
 genvm-lint check contracts/ledgersentry.py  # static GenVM validation
 ```
 

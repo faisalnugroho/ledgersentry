@@ -29,3 +29,17 @@ in `docs/PLAN.md`. No code was modified during this review.
   during testing (stub pages must not be PASS-able); PLAN's "bounded, complete
   or fail-closed" covers it.
 - No regression found. All 72 direct-mode tests map to these spec rows.
+
+
+## v1.1 steward remediation addendum (September 2026)
+
+Three Builder-Portal steward findings were addressed with a new revision;
+original rows above describe v1.0 and are retained for history.
+
+| # | Steward finding | Remediation | Tests |
+|---|---|---|---|
+| R1 | No enforceable challenge period before terminal resolution (dispute-only guard) | `open_audit` takes `challenge_seconds` (300–1209600) and writes `challenge_deadline` from the node clock; `resolve` reverts `challenge_period_active` before it for EVERY audit; a dispute still buys a FULL fresh window | test_open_audit_writes_immutable_challenge_deadline, test_resolve_before_challenge_deadline_reverts, test_resolve_after_challenge_deadline_succeeds, test_dispute_restarts_full_window_after_challenge_expiry |
+| R2 | Requirement labels not validated against their own citations | citations carry `requirement` index (0-based, range/type checked); every PASS/FAIL needs ≥1 own-requirement citation whose verbatim quote passes a deterministic lexical-overlap gate against that requirement's text (`label_without_related_citation`); UNCERTAIN is exempt; validators re-check the binding | test_label_backed_by_unrelated_requirement_citation_rejected, test_cross_requirement_citation_cannot_support_label, test_each_label_with_own_on_topic_citation_passes, test_citation_requirement_out_of_range_rejected, test_citation_requirement_wrong_type_rejected, test_validator_rejects_forged_citation_requirement |
+| R3 | Oversized sources audited only as a prefix | sources longer than their category budget are rejected as INCOMPLETE (`truncated: true`, 0 bytes judged, never decoded into the prompt); any incomplete/missing source forces INCONCLUSIVE | test_oversized_subject_resolved_incomplete_never_prefix_audited, test_oversized_evidence_resolved_incomplete, test_exact_budget_source_audited_in_full |
+
+Direct-mode suite: 94 tests green (was 72); genvm-lint validate.ok.
