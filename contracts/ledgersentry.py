@@ -160,17 +160,21 @@ _STOPWORDS = {
     "token", "artifact"}
 
 
-def normalize(raw, documents, manifest, requirement_count, requirement_texts=None):
+def normalize(raw, documents, manifest, requirement_count, requirement_texts):
     """Only stable labels and verbatim, source-indexed quotes may leave the
-    nondet block. Any shape violation degrades to the fail-safe INCONCLUSIVE;
-    the model never picks the verdict.
+    nondet block. Structural failures (no JSON, wrong label count) degrade to
+    the fail-safe INCONCLUSIVE; the model never picks the verdict.
 
-    Each label is validated against its OWN supporting citations: a PASS or
-    FAIL for requirement i must cite at least one verbatim quote that is
-    lexically related to requirement i's own text (>= MIN_LABEL_OVERLAP
-    verbatim subject words in common, deterministic). UNCERTAIN carries no
-    citation duty. Quotes unrelated to every requirement stay legal as
-    context, but can never carry a PASS/FAIL label.
+    Per-requirement citation enforcement (steward): the model's own
+    requirement tags are NEVER trusted. Every citation is re-associated by
+    content — a quote belongs to the ONE requirement whose words it is
+    lexically related to (>= MIN_LABEL_OVERLAP verbatim words, deterministic);
+    topic-less or multi-topic quotes are dropped, never guessed. A PASS or
+    FAIL for requirement i survives only if at least one surviving citation
+    was inferred for i (PASS additionally needs a subject citation);
+    otherwise that label degrades to UNCERTAIN. Recoverable junk (bad
+    reason, malformed citation entries, unknown label strings) degrades
+    gracefully per label instead of poisoning the whole audit.
     """
     try:
         data = json.loads(raw) if isinstance(raw, str) else raw
@@ -179,47 +183,52 @@ def normalize(raw, documents, manifest, requirement_count, requirement_texts=Non
         require(isinstance(labels, list), "invalid_labels_shape")
         require(len(labels) == requirement_count, "wrong_label_count")
         reason = data.get("reason")
-        require(isinstance(reason, str) and 10 <= len(reason) <= 800, "invalid_reason")
+        if not isinstance(reason, str) or len(reason.strip()) < 10:
+            reason = "Model returned no usable reason; verdict derived from labels."
+        reason = reason.strip()[:800]
         citations = data.get("citations")
-        require(isinstance(citations, list) and 0 <= len(citations) <= 12, "invalid_citations")
+        if not isinstance(citations, list):
+            citations = []
         clean = []
-        for citation in citations:
-            require(isinstance(citation, dict), "invalid_citation")
+        seen = set()
+        for citation in citations[:12]:
+            if not isinstance(citation, dict):
+                continue
             source = citation.get("source")
             quote = citation.get("quote")
-            req = citation.get("requirement")
-            require(type(source) is int, "invalid_source")
-            require(0 <= source < len(documents), "invalid_source")
-            require(isinstance(quote, str) and 20 <= len(quote) <= 400, "invalid_quote")
-            require(type(req) is int and 0 <= req < requirement_count, "invalid_citation_requirement")
-            require(documents[source] != "", "unfetched_source_cited")
-            require(quote in documents[source], "ungrounded_quote")
-            clean.append({"source": source, "quote": quote, "requirement": req})
-        compliant = []
+            if type(source) is not int or not 0 <= source < len(documents):
+                continue
+            if not isinstance(quote, str) or not 20 <= len(quote) <= 400:
+                continue
+            if documents[source] == "" or quote not in documents[source]:
+                continue
+            matches = [i for i in range(requirement_count)
+                       if len(_words(requirement_texts[i]) & _words(quote))
+                       >= MIN_LABEL_OVERLAP]
+            if len(matches) != 1:
+                continue  # topic-less or multi-topic: the contract never guesses
+            requirement = matches[0]
+            key = (source, quote, requirement)
+            if key in seen:
+                continue
+            seen.add(key)
+            clean.append({"source": source, "quote": quote,
+                          "requirement": requirement})
+        stable = []
         for i, label in enumerate(labels):
-            require(label in ("PASS", "FAIL", "UNCERTAIN"), "invalid_label_value")
-            if label == "PASS":
-                require(documents[0] != "", "pass_without_subject")
-                # PASS must cite the audited subject: ungrounded PASS labels
-                # are rejected rather than backfilled.
-                require(any(c["source"] == 0 for c in clean), "pass_without_subject_citation")
-            if label in ("PASS", "FAIL"):
-                # The label must stand on citations tied to ITS OWN
-                # requirement — a citation for one requirement can never
-                # silently support another requirement's verdict.
-                own = [c for c in clean if c["requirement"] == i]
-                if requirement_texts is not None:
-                    req_words = _words(requirement_texts[i])
-                    require(any(
-                        len(req_words & _words(c["quote"])) >= MIN_LABEL_OVERLAP
-                        for c in own), "label_without_related_citation")
-                else:
-                    require(own, "label_without_citation")
-            compliant.append(label)
+            if label not in ("PASS", "FAIL", "UNCERTAIN"):
+                label = "UNCERTAIN"  # unknown model vocabulary: unproven
+            if label == "PASS" and (documents[0] == "" or
+                                    not any(c["source"] == 0 for c in clean)):
+                label = "UNCERTAIN"  # PASS must stand on the audited subject
+            if label in ("PASS", "FAIL") and not any(
+                    c["requirement"] == i for c in clean):
+                label = "UNCERTAIN"  # no on-topic citation: unproven, not fatal
+            stable.append(label)
         # Verdict derived by the contract, never chosen by the model.
-        if "FAIL" in compliant:
+        if "FAIL" in stable:
             verdict = "VIOLATION"
-        elif "UNCERTAIN" in compliant:
+        elif "UNCERTAIN" in stable:
             verdict = "INCONCLUSIVE"
         elif documents[0] == "" or documents.count("") > 0:
             # A definitive COMPLIANT verdict requires every committed source
@@ -228,10 +237,13 @@ def normalize(raw, documents, manifest, requirement_count, requirement_texts=Non
             verdict = "INCONCLUSIVE"
         else:
             verdict = "COMPLIANT"
-        return {"verdict": verdict, "labels": compliant, "reason": reason,
+        return {"verdict": verdict, "labels": stable, "reason": reason,
                 "citations": clean, "manifest": manifest}
-    except Exception:
-        return safe_result("Invalid, ungrounded or unavailable evidence; no definitive verdict.", manifest)
+    except Exception as err:
+        detail = str(err)[:120]
+        return safe_result("Evidence could not be validated"
+                           + (": " + detail if detail else "")
+                           + "; no definitive verdict.", manifest)
 
 
 def equivalent(proposed, independent):
@@ -383,12 +395,14 @@ class LedgerSentry(gl.Contract):
                 "demonstrates compliance with that requirement; FAIL if it demonstrates a "
                 "violation; UNCERTAIN when the text lacks enough detail. Missing, empty or "
                 "unavailable sources can never be PASS. Never invent facts. "
-                "Return JSON: labels (one PASS/FAIL/UNCERTAIN per requirement, in order), "
-                "reason (10-800 chars), citations [{source: int, requirement: int, quote: "
-                "verbatim 20-400 chars}] where source is the source index, requirement is "
-                "the index of the ONE requirement this quote supports, and quote is an "
-                "exact substring of that fetched source; give each PASS or FAIL its own "
-                "supporting citation(s) quoting text about THAT requirement. "
+                "Return JSON with EXACTLY these keys: \"labels\" (a list with one "
+                "word PASS or FAIL or UNCERTAIN per requirement, in order), \"reason\" "
+                "(a string of 10 to 800 characters), \"citations\" (a list of objects, "
+                "each with keys \"source\" (int), \"quote\" (string)). Each quote must "
+                "be a verbatim 20-400 character substring copied EXACTLY from the "
+                "fetched source text at that source index, and must be about ONE "
+                "requirement's topic; give each PASS or FAIL label at least one "
+                "citation quoting the subject text about THAT requirement. "
                 "Do not choose any overall verdict.\nDATA="
                 + json.dumps({"requirements": requirements, "sources": documents})
             )

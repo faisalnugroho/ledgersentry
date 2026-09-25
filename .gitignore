@@ -1,6 +1,8 @@
-__pycache__/
-*.pyc
 artifacts/
-.venv/
-*.log
 .DS_Store
+live-v1.0.json
+live-v1.1-partial.json
+*.log
+*.pyc
+__pycache__/
+.venv/

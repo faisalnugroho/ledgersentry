@@ -430,27 +430,47 @@ def test_exact_budget_source_audited_in_full(c, direct_vm):
 # ---------- steward finding: per-requirement citation enforcement ----------
 
 def test_label_backed_by_unrelated_requirement_citation_rejected(c, direct_vm):
-    # Every citation is verbatim-grounded, but req 0's only citation is the
-    # DEPLOYER quote — it belongs to requirement 1's topic, not req 0's.
+    # The model MIS-TAGS a stray deployer quote as req 0's citation. The
+    # contract re-associates every quote by content: the stray quote is
+    # inferred to req 1 (its only lexical topic), req 0 keeps its own supply
+    # quote, and every label still stands on its own on-topic citation ->
+    # honest COMPLIANT outcome survives the model's tag confusion.
     open_default(c, challenge=300)
     warp(direct_vm)
     record = resolve(c, direct_vm, output=model(3, citations=[
         {'source': 0, 'requirement': 0,
          'quote': 'Deployer is 0xabc deployed on 2026-01-05'},
-        CITES_FULL[1], CITES_FULL[2]]))
+        CITES_FULL[0], CITES_FULL[1], CITES_FULL[2]]))
+    assert record['result']['verdict'] == 'COMPLIANT'
+    reqs = sorted(c['requirement'] for c in record['result']['citations'])
+    assert reqs == [0, 1, 2]
+
+
+def test_unfixable_label_without_any_related_citation_degrades(c, direct_vm):
+    # Req 2's label has NO on-topic citation anywhere (locks are never
+    # quoted): the contract cannot repair it, so the label degrades to
+    # UNCERTAIN and the verdict is INCONCLUSIVE — per-label fail-closed.
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, output=model(3, citations=[
+        CITES_FULL[0], CITES_FULL[1]]))
     assert record['result']['verdict'] == 'INCONCLUSIVE'
-    assert record['result']['citations'] == []
+    assert record['result']['labels'] == ['PASS', 'PASS', 'UNCERTAIN']
 
 
 def test_cross_requirement_citation_cannot_support_label(c, direct_vm):
-    # The supply quote is tagged as requirement 2's citation (locks): even a
-    # genuinely grounded quote cannot carry a foreign requirement's label.
+    # The supply quote is tagged as requirement 2's citation (locks): the
+    # contract re-associates it by content to req 0, so it can NEVER carry
+    # req 2's label — req 2 keeps its own on-topic lock quote and the honest
+    # outcome survives the model's tag confusion.
     open_default(c, challenge=300)
     warp(direct_vm)
     record = resolve(c, direct_vm, output=model(3, citations=[
         {'source': 0, 'requirement': 2, 'quote': QUOTE},
         CITES_FULL[1], CITES_FULL[2]]))
-    assert record['result']['verdict'] == 'INCONCLUSIVE'
+    assert record['result']['verdict'] == 'COMPLIANT'
+    supply_cites = [c for c in record['result']['citations'] if c['quote'] == QUOTE]
+    assert supply_cites and supply_cites[0]['requirement'] == 0
 
 
 def test_each_label_with_own_on_topic_citation_passes(c, direct_vm):
@@ -462,6 +482,9 @@ def test_each_label_with_own_on_topic_citation_passes(c, direct_vm):
 
 
 def test_fail_label_also_needs_related_citation(c, direct_vm):
+    # The FAIL label's only possible support is a deployer quote, which the
+    # contract re-assigns to req 1: req 0's FAIL stands unproven and degrades
+    # to UNCERTAIN. A FAIL can never be manufactured from an off-topic quote.
     open_default(c, challenge=300)
     warp(direct_vm)
     record = resolve(c, direct_vm, output=model(
@@ -470,6 +493,7 @@ def test_fail_label_also_needs_related_citation(c, direct_vm):
              'quote': 'Deployer is 0xabc deployed on 2026-01-05'},
             CITES_FULL[1], CITES_FULL[2]]))
     assert record['result']['verdict'] == 'INCONCLUSIVE'
+    assert record['result']['labels'] == ['UNCERTAIN', 'PASS', 'PASS']
 
 
 def test_uncertain_label_needs_no_citation(c, direct_vm):
@@ -481,20 +505,23 @@ def test_uncertain_label_needs_no_citation(c, direct_vm):
     assert len(record['result']['citations']) == 2
 
 
-def test_citation_requirement_out_of_range_rejected(c, direct_vm):
+def test_citation_requirement_out_of_range_ignored(c, direct_vm):
+    # Model tags carry no authority: the contract re-derives requirements
+    # from content, so a bogus out-of-range tag is simply ignored and the
+    # honest outcome stands.
     open_default(c, challenge=300)
     warp(direct_vm)
     bad = [dict(cite, requirement=3) for cite in CITES_FULL]
     record = resolve(c, direct_vm, output=model(3, citations=bad))
-    assert record['result']['verdict'] == 'INCONCLUSIVE'
+    assert record['result']['verdict'] == 'COMPLIANT'
 
 
-def test_citation_requirement_wrong_type_rejected(c, direct_vm):
+def test_citation_requirement_wrong_type_ignored(c, direct_vm):
     open_default(c, challenge=300)
     warp(direct_vm)
     bad = [dict(CITES_FULL[0], requirement='0')] + CITES_FULL[1:]
     record = resolve(c, direct_vm, output=model(3, citations=bad))
-    assert record['result']['verdict'] == 'INCONCLUSIVE'
+    assert record['result']['verdict'] == 'COMPLIANT'
 
 
 def test_validator_rejects_forged_citation_requirement(c, direct_vm):
@@ -507,18 +534,34 @@ def test_validator_rejects_forged_citation_requirement(c, direct_vm):
     assert outcome is False
 
 
+def test_validator_rejects_forged_quote(c, direct_vm):
+    # A tampered quote fails the verbatim substring check in the validator's
+    # independent re-normalization.
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, output=model(3))
+    forged = json.loads(json.dumps(record['result']))
+    forged['citations'][0]['quote'] = 'total supply is 1,000,000 with 18 decimalss'
+    outcome = direct_vm.run_validator(leader_result=forged)
+    assert outcome is False
+
+
 # ---------- model shape / grounding ----------
 
 @pytest.mark.parametrize('output,expect_verdict', [
     (model(2), 'INCONCLUSIVE'),
     (model(3, ['pass', 'PASS', 'PASS']), 'INCONCLUSIVE'),
     ({'labels': ['PASS'] * 3}, 'INCONCLUSIVE'),
-    (model(3, reason='short'), 'INCONCLUSIVE'),
+    (model(3, reason='short'), 'COMPLIANT'),  # thin reason recovered deterministically
     ({'labels': ['PASS'] * 3, 'reason': 'r' * 30, 'citations': 'no'}, 'INCONCLUSIVE'),
     (model(3, citations=[{'source': 0, 'requirement': 0, 'quote': 'too short'}]),
      'INCONCLUSIVE'),
     (model(3, citations=[{'source': 9, 'requirement': 0, 'quote': 'x' * 40}]),
      'INCONCLUSIVE'),
+    (model(3, citations=CITES_FULL + [
+        {'quote': 'garbage citation entry without required keys'},
+        {'source': 'zero', 'requirement': 1, 'quote': QUOTE}]),
+     'COMPLIANT'),  # malformed entries dropped, valid ones survive
     ('not-json-at-all', 'INCONCLUSIVE'),
 ])
 def test_model_shape_fail_safe(c, direct_vm, output, expect_verdict):
@@ -526,6 +569,16 @@ def test_model_shape_fail_safe(c, direct_vm, output, expect_verdict):
     warp(direct_vm)
     record = resolve(c, direct_vm, output=output)
     assert record['result']['verdict'] == expect_verdict
+
+
+def test_lowercase_label_vocabulary_degrades_to_uncertain(c, direct_vm):
+    # Unknown model vocabulary ('pass') is not a proven label: it degrades to
+    # UNCERTAIN instead of nuking the audit — but the verdict stays honest.
+    open_default(c, challenge=300)
+    warp(direct_vm)
+    record = resolve(c, direct_vm, output=model(3, ['pass', 'PASS', 'PASS']))
+    assert record['result']['verdict'] == 'INCONCLUSIVE'
+    assert record['result']['labels'][0] == 'UNCERTAIN'
 
 
 def test_grounded_citation_kept(c, direct_vm):
