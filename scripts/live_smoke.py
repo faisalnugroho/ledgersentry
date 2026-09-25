@@ -13,11 +13,31 @@ import requests
 from genlayer_py import create_client, create_account
 from genlayer_py.chains import studionet
 
+import threading
+
+def call_with_timeout(fn, seconds, *args, **kwargs):
+    """SDK calls have no timeout parameter; a silent Cloudflare hold can hang
+    a socket open forever. Hard-timeout every SDK call from a helper thread."""
+    box = {}
+    def target():
+        try:
+            box["result"] = fn(*args, **kwargs)
+        except BaseException as err:
+            box["error"] = err
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    t.join(seconds)
+    if t.is_alive():
+        raise TimeoutError("sdk call exceeded " + str(seconds) + "s")
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+
 ROOT = Path(__file__).resolve().parents[1]
 LOG = ROOT / "evidence/live.json"
 KEY = Path.home() / ".genlayer-keys/ledgersentry-key.json"
 RPC = "https://studio.genlayer.com/api"
-REV = "5c541acdf2d4f6542bdafbb6cea34cdfd096827d"  # deployed commit pinning every example source (full 40-hex: contract regex requires it)
+REV = "2ecf05c13e6cfe6318ba61a91ef033927c24dc09"  # deployed commit pinning every example source (full 40-hex: contract regex requires it)
 BASE = "https://raw.githubusercontent.com/faisalnugroho/ledgersentry"
 
 REQS = [
@@ -34,12 +54,22 @@ EV_REBUTTAL = 'Dispute rebuttal: the audit subject remains accurate. The indepen
 
 
 def rpc(method, params):
-    response = requests.post(RPC, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, timeout=45)
-    response.raise_for_status()
-    data = response.json()
-    if "error" in data:
-        raise RuntimeError(data["error"])
-    return data["result"]
+    last = None
+    for attempt in range(5):
+        try:
+            response = requests.post(RPC, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, timeout=45)
+            response.raise_for_status()
+            data = response.json()
+            if "error" in data:
+                raise RuntimeError(data["error"])
+            return data["result"]
+        except (requests.exceptions.RequestException, RuntimeError) as err:
+            last = err
+            if attempt == 4:
+                raise
+            print("rpc error, retrying:", str(err)[:120], flush=True)
+            time.sleep(10 * (attempt + 1))
+    raise last
 
 
 def save(data):
@@ -126,7 +156,7 @@ def run():
             tx = None
             for attempt in range(4):
                 try:
-                    tx = client.write_contract(address=address, function_name=method, args=values, account=client.local_account, leader_only=False)
+                    tx = call_with_timeout(client.write_contract, 120, address=address, function_name=method, args=values, account=client.local_account, leader_only=False)
                     break
                 except Exception as err:
                     if attempt == 3:
@@ -146,7 +176,17 @@ def run():
         print(label, "verified", receipt.get("result_name"), receipt.get("tx_execution_result_name"), flush=True)
 
     def read(aid):
-        return json.loads(client.read_contract(address=address, function_name="get_audit", args=[aid]))
+        last = None
+        for attempt in range(5):
+            try:
+                return json.loads(call_with_timeout(client.read_contract, 90, address=address, function_name="get_audit", args=[aid]))
+            except Exception as err:
+                last = err
+                if attempt == 4:
+                    raise
+                print("read error, retrying:", str(err)[:120], flush=True)
+                time.sleep(10 * (attempt + 1))
+        raise last
 
     def audit(label, aid, subject_file, subject_body, evidence=(), window=3600):
         write(label + "-open", "open_audit", [aid, "Live smoke: " + aid, pinned(subject_file), sha(subject_body), json.dumps(REQS), window])
@@ -178,21 +218,33 @@ def run():
     save(log)
     assert record["status"] == "RESOLVED" and record["result"]["verdict"] == "INCONCLUSIVE", record
 
-    # 5: dispute path with a short window (minimum 60s on-chain)
-    audit("dispute", "ls-dispute", "subject-ok.md", SUBJECT_OK, window=60)
-    write("dispute-open", "open_dispute", ["ls-dispute"])
-    record = read("ls-dispute")
+    # 5a: response-window guard on a 1h window — early resolve MUST revert.
+    # (A 60s window here is racy: multi-round consensus on a slow validator
+    # set can outlive it, executing the resolve legitimately after the
+    # deadline. One hour makes the guard deterministic under any consensus
+    # delay; the successful ls-dispute resolve at 60s already covers the
+    # post-deadline path.)
+    audit("guard", "ls-guard", "subject-ok.md", SUBJECT_OK, window=3600)
+    write("guard-mark", "open_dispute", ["ls-guard"])
+    record = read("ls-guard")
     assert record["status"] == "DISPUTED" and record["dispute_deadline"] > 0, record
-    write("dispute-ev", "add_dispute_evidence", ["ls-dispute", pinned("dispute-rebuttal.md"), sha(EV_REBUTTAL)])
-    write("dispute-early", "resolve", ["ls-dispute"], expected_success=False)
-    record = read("ls-dispute")
+    write("guard-early", "resolve", ["ls-guard"], expected_success=False)
+    record = read("ls-guard")
     assert record["status"] == "DISPUTED", record
+
+    # 5b: dispute evidence + post-window resolution (60s minimum window).
+    audit("disp2", "ls-dispute2", "subject-ok.md", SUBJECT_OK, window=60)
+    if read("ls-dispute2")["status"] == "OPEN":  # idempotent: an earlier uncertain send may have landed
+        write("disp2-mark", "open_dispute", ["ls-dispute2"])
+    record = read("ls-dispute2")
+    assert record["status"] == "DISPUTED" and record["dispute_deadline"] > 0, record
+    write("disp2-ev", "add_dispute_evidence", ["ls-dispute2", pinned("dispute-rebuttal.md"), sha(EV_REBUTTAL)])
     print("waiting out the 60s dispute window...", flush=True)
     while time.time() < record["dispute_deadline"] + 5:
         time.sleep(5)
-    write("dispute-resolve", "resolve", ["ls-dispute"])
-    record = read("ls-dispute")
-    log.setdefault("audits", {})["ls-dispute"] = record
+    write("disp2-resolve", "resolve", ["ls-dispute2"])
+    record = read("ls-dispute2")
+    log.setdefault("audits", {})["ls-dispute2"] = record
     save(log)
     assert record["status"] == "RESOLVED", record
 
