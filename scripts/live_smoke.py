@@ -37,7 +37,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LOG = ROOT / "evidence/live.json"
 KEY = Path.home() / ".genlayer-keys/ledgersentry-key.json"
 RPC = "https://studio.genlayer.com/api"
-REV = "4e82728ddf708018e902ecf1bdcd72d06b910cfe"  # deployed commit pinning every example source (full 40-hex: contract regex requires it)
+REV = "0b8c0a5f945763047ddca26a8d924829e20fb949"  # deployed commit pinning every example source (full 40-hex: contract regex requires it)
 BASE = "https://raw.githubusercontent.com/faisalnugroho/ledgersentry"
 CHALLENGE = 86400  # universal challenge period written at open_audit
 
