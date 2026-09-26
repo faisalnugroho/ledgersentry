@@ -427,6 +427,59 @@ def test_exact_budget_source_audited_in_full(c, direct_vm):
     assert record['result']['verdict'] == 'COMPLIANT'
 
 
+def test_contradictory_text_beyond_analysis_limit_fails_closed(c, direct_vm):
+    # STEWARD: contradictory text beyond the analysis limit. The subject's
+    # first SUBJECT_BUDGET bytes read fully compliant; the contradiction
+    # deliberately sits AFTER the budget, so only a prefix-audit (or any
+    # truncated use of the source) could ever score the subject COMPLIANT.
+    head = ('Token LAUNCH total supply is 1,000,000 with 18 decimals. Deployer is '
+            '0xabc deployed on 2026-01-05. Locks: team 40% released 2027-01-05, '
+            'community 10% released 2026-07-05. ')
+    tail = ('CONTRADICTION: the team lock was revoked and the supply was secretly '
+            'minted to 2,000,000; earlier statements are no longer accurate. ' * 100)
+    bloated = head + tail
+    assert len(head.encode()) < SUBJECT_BUDGET < len(bloated.encode())
+    open_default(c, subject=bloated, challenge=300)
+    warp(direct_vm)
+    # The model claims every requirement PASS using in-head (in-prefix) quotes.
+    output = model(3, citations=[
+        {'source': 0, 'requirement': 0, 'quote': QUOTE},
+        {'source': 0, 'requirement': 1,
+         'quote': 'Deployer is 0xabc deployed on 2026-01-05'},
+        {'source': 0, 'requirement': 2,
+         'quote': 'Locks: team 40% released 2027-01-05'}])
+    mock_sources(direct_vm, subject=bloated)
+    direct_vm.mock_llm('.*', json.dumps(output))
+    seen = []
+    original = direct_vm._match_llm_mock
+
+    def spy(prompt):
+        seen.append(prompt)
+        return original(prompt)
+
+    direct_vm._match_llm_mock = spy
+    c.resolve('audit-1')
+    direct_vm._match_llm_mock = original
+    record = get(c, 'audit-1')
+    # 1. No prefix of the source reaches the model: neither the compliant
+    #    head (a prefix-audit would have passed) nor the beyond-limit
+    #    contradiction is present in the prompt — the oversized source is
+    #    dropped whole, never audited as a prefix.
+    assert len(seen) >= 1
+    assert QUOTE not in seen[0]
+    assert 'CONTRADICTION' not in seen[0]
+    # 2. Digest-verified but recorded as truncated / incomplete, zero bytes.
+    entry = record['result']['manifest'][0]
+    assert entry['digest_ok'] is True and entry['truncated'] is True
+    assert entry['bytes'] == 0
+    # 3. The contradictory source contributes no usable citation.
+    assert record['result']['citations'] == []
+    # 4+5. Labels cannot stand (no auditable subject text), so the verdict
+    #    can never become COMPLIANT from this source: fail-closed.
+    assert record['result']['labels'] == ['UNCERTAIN', 'UNCERTAIN', 'UNCERTAIN']
+    assert record['result']['verdict'] == 'INCONCLUSIVE'
+
+
 # ---------- steward finding: per-requirement citation enforcement ----------
 
 def test_label_backed_by_unrelated_requirement_citation_rejected(c, direct_vm):
